@@ -1,6 +1,7 @@
 """
 🚗 Car Service Tracker Bot — Single User
 Custom price: confirm default or type new price within 10 seconds.
+Fixed for Python 3.14 + Render deployment.
 """
 
 import logging
@@ -8,7 +9,8 @@ import json
 import os
 import asyncio
 import csv
-from datetime import datetime, time as dt_time
+import threading
+from datetime import datetime, timedelta, time as dt_time
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -508,12 +510,10 @@ async def auto_return_to_main(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
 
 # ==================== PRICE CONFIRMATION FLOW ====================
 async def start_price_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str, key: str):
-    """Show price confirmation and wait for user input."""
     service = SERVICES[category]["items"][key]
     service_name = service["name"]
     default_price = service["price"]
 
-    # Store pending order info
     context.user_data["pending_order"] = {
         "category": category,
         "key": key,
@@ -525,16 +525,13 @@ async def start_price_confirmation(update: Update, context: ContextTypes.DEFAULT
     text = Reports.price_prompt(service_name, default_price)
     master_msg_id = await ensure_single_master_message(update, context, text, UI.confirm_price(service_name, default_price))
 
-    # Start 10-second timer
     chat_id = update.effective_chat.id
     asyncio.create_task(_price_timeout(context, chat_id, master_msg_id))
 
 
 async def _price_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int, master_msg_id: int):
-    """Wait 10 seconds, if no price entered, confirm with default."""
     await asyncio.sleep(10)
 
-    # Check if still awaiting price
     if not context.user_data.get("awaiting_price"):
         return
 
@@ -542,17 +539,14 @@ async def _price_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int, maste
     if not pending:
         return
 
-    # Use default price
     category = pending["category"]
     key = pending["key"]
     service_name = pending["service_name"]
     default_price = pending["default_price"]
 
-    # Clear state
     context.user_data.pop("awaiting_price", None)
     context.user_data.pop("pending_order", None)
 
-    # Record order with default price
     order = OrderStore.add(f"{category}_{key}", service_name, default_price)
     text = Reports.confirmation(order)
 
@@ -564,15 +558,13 @@ async def _price_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int, maste
 
 
 async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user price input during confirmation."""
     if not context.user_data.get("awaiting_price"):
-        return False  # Not in price confirmation mode
+        return False
 
     text = update.message.text.strip()
     chat_id = update.message.chat_id
     master_msg_id = context.user_data.get("master_msg_id")
 
-    # Delete user's message to keep chat clean
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
     except:
@@ -586,13 +578,11 @@ async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     key = pending["key"]
     service_name = pending["service_name"]
 
-    # Try to parse price
     try:
         new_price = int(text)
         if new_price <= 0:
             raise ValueError("Price must be positive")
     except ValueError:
-        # Invalid price, show error and keep waiting
         if master_msg_id:
             error_text = (
                 f"❌ *سعر غير صحيح*\n\n"
@@ -603,11 +593,9 @@ async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await safe_edit_message(context, chat_id, master_msg_id, error_text, UI.confirm_price(service_name, pending['default_price']))
         return True
 
-    # Clear state
     context.user_data.pop("awaiting_price", None)
     context.user_data.pop("pending_order", None)
 
-    # Record order with custom price
     order = OrderStore.add(f"{category}_{key}", service_name, new_price)
     text = Reports.confirmation(order)
 
@@ -654,14 +642,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     chat_id = query.message.chat_id
 
-    # ─── Navigation ───
     if data == "back_main":
-        # Cancel any pending price confirmation
         context.user_data.pop("awaiting_price", None)
         context.user_data.pop("pending_order", None)
         return await start(update, context)
 
-    # ─── Confirm Default Price ───
     if data == "confirm_default_price":
         pending = context.user_data.get("pending_order")
         if pending:
@@ -678,7 +663,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(auto_return_to_main(context, chat_id, master_msg_id, delay=2))
         return
 
-    # ─── Delete Confirmation ───
     if data == "delete_confirm":
         text = Reports.delete_confirmation_preview()
         if "مفيش" in text:
@@ -688,7 +672,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ensure_single_master_message(update, context, text, UI.confirm_delete())
         return
 
-    # ─── Service Menus ───
     if data.startswith("menu_"):
         category = data.replace("menu_", "")
         if category in SERVICES:
@@ -697,7 +680,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ensure_single_master_message(update, context, text, UI.service_menu(category))
         return
 
-    # ─── Record Order (start price confirmation) ───
     if data.startswith("order_"):
         parts = data.replace("order_", "").split("_", 1)
         if len(parts) == 2:
@@ -706,7 +688,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await start_price_confirmation(update, context, category, key)
         return
 
-    # ─── Delete Last (confirmed) ───
     if data == "delete_last":
         deleted = OrderStore.pop_last()
         if deleted:
@@ -722,7 +703,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(auto_return_to_main(context, chat_id, master_msg_id, delay=2))
         return
 
-    # ─── Reports ───
     report_map = {
         "report_today":   Reports.daily(),
         "report_month":   Reports.monthly(),
@@ -733,7 +713,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_single_master_message(update, context, report_map[data], UI.back_only())
         return
 
-    # ─── Backup Menu ───
     if data == "backup_menu":
         text = "💾 *إدارة الباك اب*\n\nاختار الإجراء:"
         await ensure_single_master_message(update, context, text, UI.backup_menu())
@@ -784,13 +763,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages — primarily for price input."""
-    # Check if we're awaiting a price
     if await handle_price_input(update, context):
         return
-
-    # Not a price input, ignore or handle other text
-    # Delete the message to keep chat clean
     try:
         await context.bot.delete_message(
             chat_id=update.message.chat_id,
@@ -806,18 +780,34 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MAIN ====================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Fix for Python 3.14: create event loop explicitly
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    if OWNER_CHAT_ID:
-        try:
+    # Build application with job queue
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # Schedule daily backup using apscheduler (built-in with job_queue)
+    try:
+        from telegram.ext import JobQueue
+        if app.job_queue:
             app.job_queue.run_daily(
                 daily_backup_job,
                 time=dt_time(hour=0, minute=0),
                 name="daily_backup"
             )
             logger.info("Daily backup scheduled for midnight")
-        except Exception as e:
-            logger.error(f"Failed to schedule backup: {e}")
+        else:
+            logger.warning("JobQueue not available, skipping scheduled backup")
+    except Exception as e:
+        logger.warning(f"Could not schedule backup: {e}")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
